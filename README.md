@@ -29,14 +29,14 @@ match detect_probe()? {
 }
 // 例如: ST-Link (SN: 003F00313234510136303532) -> -f interface/stlink.cfg
 
-// 2) 监听插拔(udev 内核事件, 后台线程 + 通道, 非阻塞取)
-let watcher = ProbeWatcher::start()?;   // 启动时立刻给出当前状态
+// 2) 监听插拔: 每次调用扫一次 sysfs, 状态变了才返回
+let mut watcher = ProbeWatcher::start()?;   // 记录当前状态作为基线
 loop {
-    while let Some(state) = watcher.try_next() {   // 没有变化则返回 None
+    if let Some(state) = watcher.try_next() {   // 非阻塞; 没变化返回 None
         println!("状态变化: {state}");
     }
+    std::thread::sleep(std::time::Duration::from_millis(100));
 }
-// 丢弃 watcher 即确定性关闭: 置停止标志 → eventfd 唤醒线程 → join(实测约 30µs)
 
 // 3) 连接 OpenOCD
 let mut ocd = OpenOcd::new("127.0.0.1", 4444);     // 构造函数(不联网, 不会失败)
@@ -48,12 +48,18 @@ ocd.connect()?;                                    // 连接并完成握手
 - **ST-Link 按 PID 白名单认**(`0483` 下还有虚拟串口等非调试产品);
   **J-Link 按 VID 认**(`1366` 下基本只有调试器);
 - 目前只区分 ST-Link / J-Link 两大类; 插多个时取第一个;
-- `ProbeError` 只表示真故障(读不了 sysfs / 启不了 udev 监听), "没插探针"用
-  `ProbeState::Disconnected` 表达。
+- `ProbeError` 只表示真故障(读不了 sysfs), "没插探针"用 `ProbeState::Disconnected` 表达。
+
+热插拔的做法(刻意选了最朴素的一种):
+- **没有后台线程**: `try_next()` 就是"扫一次 sysfs, 和上次比", 变了才返回;
+- 实测一次扫描约 **41µs**, 所以按 100Hz 调用也只占单核 0.4%, 不值得为它开线程;
+- 只有 `thiserror` 一个依赖(不需要 libudev), 也不存在"线程怎么关"的问题;
+- 将来若真需要"没人调用时也能收到事件", 可以把 udev 事件塞进 `try_next()` 内部,
+  公开接口不用改。
 
 用法:
 - `cargo build` / `cargo run`(打印 hello world)
-- `cargo test`: 9 个单元测试, 无需硬件
+- `cargo test`: 8 个单元测试, 无需硬件
 - 真机插拔测试(默认忽略, 需手动插拔探针, 90 秒内插上再拔掉):
   `cargo test hotplug -- --ignored --show-output`
 

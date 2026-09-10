@@ -3,24 +3,10 @@
 use std::fmt;
 use std::fs;
 use std::io;
-use std::os::fd::AsFd;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver};
-use std::sync::Arc;
-use std::thread::{self, JoinHandle};
-use std::time::Duration;
-
-use nix::errno::Errno;
-use nix::poll::{poll, PollFd, PollFlags};
-use nix::sys::eventfd::{EfdFlags, EventFd};
-use udev::{EventType, MonitorBuilder};
 
 /// sysfs 里 USB 设备所在的目录(每个设备一个子目录)。
 const USB_DEVICES: &str = "/sys/bus/usb/devices";
-
-/// 轮询兜底超时(毫秒): 关闭由 eventfd 立即唤醒, 这里只是保险丝。
-const POLL_TIMEOUT_MS: u16 = 1000;
 
 /// 支持的探针种类。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,9 +60,6 @@ pub enum ProbeError {
     /// 读取系统 USB 信息失败
     #[error("读取系统 USB 信息失败")]
     Sysfs(#[from] io::Error),
-    /// 监听 USB 插拔事件失败
-    #[error("监听 USB 插拔事件失败")]
-    Watch(#[source] io::Error),
 }
 
 /// 探针状态。
@@ -97,126 +80,35 @@ impl fmt::Display for ProbeState {
     }
 }
 
-/// 监听探针插拔(基于 udev 内核事件)。
+/// 监听探针插拔。
 ///
-/// 后台线程只在状态**发生变化**时往通道里放一个 [`ProbeState`],
-/// 上层用 [`ProbeWatcher::try_next`] 非阻塞地取。
-/// 丢弃 watcher 时会停止并等待线程收工(`Drop` 里加入), 不留游离线程。
+/// 做法很朴素: **每次调用 [`ProbeWatcher::try_next`] 就扫一次 sysfs**,
+/// 和上次记录的状态比较, 变了就返回新状态。没有后台线程、没有额外依赖,
+/// 也不需要"关闭"——没有任何东西在后台跑。
+///
+/// 调用方(通常是界面刷新循环)自己决定检查频率, 例如每 100ms 一次。
 pub struct ProbeWatcher {
-    states: Receiver<ProbeState>,
-    /// 通知监听线程收工
-    stop: Arc<AtomicBool>,
-    /// 写一个字节就能立刻叫醒卡在 poll 上的监听线程
-    wake: Arc<EventFd>,
-    /// 监听线程句柄; `Drop` 里 join 之后才算真正关闭
-    thread: Option<JoinHandle<()>>,
-}
-
-impl Drop for ProbeWatcher {
-    /// 置停止标志 → 唤醒线程 → 等它退出。
-    /// 关闭是确定性的, 不依赖"下次碰巧有 USB 事件"。
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        let _ = self.wake.write(1);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-    }
+    /// 上次看到的状态, 用来判断"变了没有"
+    last: ProbeState,
 }
 
 impl ProbeWatcher {
-    /// 启动监听, 并立刻把当前状态作为第一个事件放进通道。
+    /// 开始监听: 记录当前状态作为基线。
     pub fn start() -> Result<Self, ProbeError> {
-        let (sender, states) = mpsc::channel();
-        let (ready_sender, ready) = mpsc::channel();
-        let stop = Arc::new(AtomicBool::new(false));
-        // eventfd 只用来"叫醒"阻塞中的监听线程, 让它立刻看到停止标志
-        let wake = Arc::new(
-            EventFd::from_value_and_flags(0, EfdFlags::EFD_NONBLOCK)
-                .map_err(|e| ProbeError::Watch(io::Error::from(e)))?,
-        );
-        let thread_stop = Arc::clone(&stop);
-        let thread_wake = Arc::clone(&wake);
-
-        // udev 的监听器内部是裸指针, 不是 Send, 因此只能在监听线程里创建并持有它
-        let thread = thread::spawn(move || {
-            let socket = match MonitorBuilder::new()
-                .and_then(|builder| builder.match_subsystem_devtype("usb", "usb_device"))
-                .and_then(|builder| builder.listen())
-            {
-                Ok(socket) => socket,
-                Err(e) => {
-                    let _ = ready_sender.send(Err(ProbeError::Watch(e)));
-                    return;
-                }
-            };
-            let fd = socket.as_fd();
-            let mut last = match detect_probe() {
-                Ok(state) => state,
-                Err(e) => {
-                    let _ = ready_sender.send(Err(e));
-                    return;
-                }
-            };
-            let _ = ready_sender.send(Ok(())); // 启动成功, 放行 start()
-            let _ = sender.send(last.clone());
-
-            loop {
-                if thread_stop.load(Ordering::Relaxed) {
-                    return;
-                }
-                // 同时等: udev 事件 fd 与"被 Drop 叫醒"的 eventfd
-                let mut fds = [
-                    PollFd::new(fd, PollFlags::POLLIN),
-                    PollFd::new(thread_wake.as_fd(), PollFlags::POLLIN),
-                ];
-                match poll(&mut fds, POLL_TIMEOUT_MS) {
-                    Ok(0) => continue, // 兜底超时, 回头看看停止标志
-                    Ok(_) => {}
-                    Err(Errno::EINTR) => continue, // 被信号打断, 重试
-                    Err(_) => return,
-                }
-                if thread_stop.load(Ordering::Relaxed) {
-                    return; // 这次醒来是 Drop 叫的
-                }
-
-                let Some(event) = socket.iter().next() else {
-                    continue;
-                };
-                if !matches!(event.event_type(), EventType::Add | EventType::Remove) {
-                    continue;
-                }
-                // 内核事件与 sysfs 增删之间可能有极短的时间差, 稍等一下再扫
-                thread::sleep(Duration::from_millis(50));
-                let Ok(state) = detect_probe() else { continue };
-                if state != last {
-                    last = state.clone();
-                    if sender.send(state).is_err() {
-                        return; // 上层已丢弃 watcher, 收工
-                    }
-                }
-            }
-        });
-
-        // 等监听线程报告"启动成功/失败"
-        let started = ready
-            .recv()
-            .map_err(|e| ProbeError::Watch(io::Error::other(e)))?;
-        if let Err(e) = started {
-            let _ = thread.join();
-            return Err(e);
-        }
         Ok(Self {
-            states,
-            stop,
-            wake,
-            thread: Some(thread),
+            last: detect_probe()?,
         })
     }
 
-    /// 非阻塞取一个状态变化; `None` 表示自上次之后没有变化。
-    pub fn try_next(&self) -> Option<ProbeState> {
-        self.states.try_recv().ok()
+    /// 非阻塞检查一次: 状态有变化返回 `Some(新状态)`, 没变化返回 `None`。
+    /// 扫描出错(读不了 sysfs)时保持上次状态, 也返回 `None`。
+    pub fn try_next(&mut self) -> Option<ProbeState> {
+        let now = detect_probe().ok()?;
+        if now == self.last {
+            return None;
+        }
+        self.last = now.clone();
+        Some(now)
     }
 }
 
@@ -279,7 +171,8 @@ fn identify(vid: u16, pid: u16) -> Option<ProbeKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Instant;
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn identifies_known_probes() {
@@ -336,49 +229,34 @@ mod tests {
         }
     }
 
-    /// 监听器启动后应立刻给出当前状态, 免得上层还要自己查一次。
+    /// 没有插拔时, 反复检查应当都返回 `None`(不该凭空报变化)。
     #[test]
-    fn watcher_reports_state_on_start() {
-        let watcher = ProbeWatcher::start().expect("启动 udev 监听失败");
-        let first = watcher.try_next().expect("启动后应立刻有一个状态");
-        println!("启动时的状态: {first}");
+    fn watcher_reports_nothing_when_unchanged() {
+        let mut watcher = ProbeWatcher::start().expect("启动监听失败");
+        for _ in 0..3 {
+            assert!(watcher.try_next().is_none(), "状态没变却说变了");
+        }
     }
 
-    /// 丢弃 watcher 应当停止监听线程并立刻返回(确定性关闭)。
-    #[test]
-    fn watcher_stops_on_drop() {
-        let watcher = ProbeWatcher::start().expect("启动 udev 监听失败");
-        let started = Instant::now();
-        drop(watcher); // 内部: 置停止标志 + join
-        let elapsed = started.elapsed();
-        println!("关闭耗时: {elapsed:?}");
-        assert!(
-            elapsed < Duration::from_millis(50),
-            "关闭太慢: {elapsed:?} (应当被 eventfd 立即唤醒)"
-        );
-    }
-
-    /// 真机插拔测试(默认忽略): 跑起来后插上再拔掉探针。
+    /// 真机插拔测试(默认忽略): 跑起来后插上/拔掉探针各一次。
     /// 跑法: `cargo test hotplug -- --ignored --show-output`
     #[test]
     #[ignore = "需要手动拔插探针"]
     fn hotplug_reports_changes() {
-        let watcher = ProbeWatcher::start().unwrap();
-        // 启动时给出的当前状态不算"变化", 先取走
+        let mut watcher = ProbeWatcher::start().unwrap();
+        println!("当前状态: {}", detect_probe().unwrap());
         println!(
-            "启动时的状态: {}",
-            watcher.try_next().expect("启动后应立刻有状态")
+            "最长监听 90 秒: 请插上/拔掉探针各一次(每 100ms 查一次, 观察到两次变化就提前结束)"
         );
-        println!("最长监听 90 秒: 请插上/拔掉探针各一次(观察到两次变化就提前结束)");
 
         let deadline = Instant::now() + Duration::from_secs(90);
         let mut changes = 0;
         while Instant::now() < deadline && changes < 2 {
-            while let Some(state) = watcher.try_next() {
+            if let Some(state) = watcher.try_next() {
                 println!("状态变化: {state}");
                 changes += 1;
             }
-            thread::sleep(Duration::from_millis(50));
+            thread::sleep(Duration::from_millis(100));
         }
         assert!(changes > 0, "监听期间没观察到任何插拔");
     }
