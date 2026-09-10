@@ -6,5 +6,7 @@ description = "通用 MCU 调试器 —— 里程碑 0：探针检测 + OpenOCD 
 license = "MIT"
 
 [dependencies]
+nix = { version = "0.31.3", features = ["event", "poll"] }
 # 错误类型用业界标准做法生成(Display/Error/From/source 都不用手写)
 thiserror = "2.0.20"
+udev = "0.9.3"
