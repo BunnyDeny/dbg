@@ -162,4 +162,19 @@ mod tests {
         };
         assert_eq!(no_serial.to_string(), "ST-Link (无序列号)");
     }
+
+    /// 真机测试: 直接跑 detect_probe() 扫真实的 /sys/bus/usb/devices。
+    /// 用 `cargo test detect_probe -- --nocapture` 看它认出了什么。
+    /// 不断言"必须插着探针"(否则没插硬件的机器上会失败), 只要求结果自洽。
+    #[test]
+    fn detect_probe_on_real_sysfs() {
+        match detect_probe() {
+            Ok(probe) => {
+                println!("检测到探针: {probe} -> -f {}", probe.kind.interface_config());
+                assert!(probe.kind.interface_config().starts_with("interface/"));
+                assert_ne!(probe.vid, 0);
+            }
+            Err(e) => println!("未检测到探针: {e}"),
+        }
+    }
 }
