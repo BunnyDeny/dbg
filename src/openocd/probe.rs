@@ -54,29 +54,16 @@ impl fmt::Display for Probe {
 }
 
 /// 探针检测的错误。
-#[derive(Debug)]
+/// thiserror 会依据下面的属性自动生成 Display 与 std::error::Error,
+/// `#[from]` 还会顺带生成 From<io::Error> 并把 io 错误挂进错误链(source)。
+#[derive(Debug, thiserror::Error)]
 pub enum ProbeError {
     /// 没插任何受支持的探针
+    #[error("没插任何受支持的探针(ST-Link / J-Link)")]
     NotFound,
     /// 读取系统 USB 信息失败
-    Io(io::Error),
-}
-
-impl fmt::Display for ProbeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ProbeError::NotFound => f.write_str("没插任何受支持的探针(ST-Link / J-Link)"),
-            ProbeError::Io(e) => write!(f, "读取系统 USB 信息失败: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for ProbeError {}
-
-impl From<io::Error> for ProbeError {
-    fn from(e: io::Error) -> Self {
-        ProbeError::Io(e)
-    }
+    #[error("读取系统 USB 信息失败")]
+    Io(#[from] io::Error),
 }
 
 /// 检测当前插着的探针。

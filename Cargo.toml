@@ -2,9 +2,9 @@
 name = "dbg"
 version = "0.1.0"
 edition = "2021"
-description = "通用 MCU 调试器 —— 里程碑 0：与 OpenOCD telnet 端口通信的客户端"
+description = "通用 MCU 调试器 —— 里程碑 0：探针检测 + OpenOCD 连接"
 license = "MIT"
 
-# 里程碑 0 刻意零第三方依赖：协议层只用标准库,
-# 等你理解了收发包逻辑, 再引入 clap / tokio 也不迟。
 [dependencies]
+# 错误类型用业界标准做法生成(Display/Error/From/source 都不用手写)
+thiserror = "2.0.20"
