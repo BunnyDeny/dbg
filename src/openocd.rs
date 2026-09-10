@@ -1,5 +1,10 @@
-//! OpenOCD 调试后端。目前只负责"连接":
-//! 所有与 OpenOCD 打交道的细节都收在本模块, 上层只调用公开函数。
+//! OpenOCD 调试后端。所有与 OpenOCD 打交道的细节都收在本模块, 上层只调用公开函数:
+//! - `detect_probe()`: 认出插着的是哪个烧录器(内部由 probe 子模块实现, 不对外暴露)
+//! - `OpenOcd::new` / `connect`: 连接 OpenOCD
+
+mod probe;
+
+pub use probe::{detect_probe, Probe, ProbeError, ProbeKind};
 
 use std::io::{self, Read};
 use std::net::TcpStream;
