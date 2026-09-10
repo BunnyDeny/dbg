@@ -239,7 +239,7 @@ mod tests {
     }
 
     /// 真机插拔测试(默认忽略): 跑起来后插上/拔掉探针各一次。
-    /// 跑法: `cargo test hotplug -- --ignored --show-output`
+    /// 跑法: `cargo test hotplug -- --ignored --nocapture`
     #[test]
     #[ignore = "需要手动拔插探针"]
     fn hotplug_reports_changes() {
