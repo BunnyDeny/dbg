@@ -4,7 +4,3 @@ version = "0.1.0"
 edition = "2021"
 description = "通用 MCU 调试器 —— 里程碑 0：探针检测 + OpenOCD 连接"
 license = "MIT"
-
-[dependencies]
-# 错误类型用业界标准做法生成(Display/Error/From/source 都不用手写)
-thiserror = "2.0.20"

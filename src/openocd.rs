@@ -1,11 +1,11 @@
 //! OpenOCD 调试后端。所有与 OpenOCD 打交道的细节都收在本模块, 上层只调用公开函数:
 //! - `detect_probe()`: 查一次探针状态(内部由 probe 子模块实现, 不对外暴露)
-//! - `ProbeWatcher::start` / `try_next`: 监听探针插拔(基于 udev 内核事件)
+//! - `ProbeWatcher::start` / `try_next`: 监听探针插拔(每次调用扫一次 sysfs)
 //! - `OpenOcd::new` / `connect`: 连接 OpenOCD
 
 mod probe;
 
-pub use probe::{detect_probe, Probe, ProbeError, ProbeKind, ProbeState, ProbeWatcher};
+pub use probe::{detect_probe, Probe, ProbeKind, ProbeState, ProbeWatcher};
 
 use std::io::{self, Read};
 use std::net::TcpStream;

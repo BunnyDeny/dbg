@@ -53,15 +53,6 @@ impl fmt::Display for Probe {
     }
 }
 
-/// 探针相关操作的错误。
-/// "没插探针"不是错误, 而是 [`ProbeState::Disconnected`]; 这里只留真正的故障。
-#[derive(Debug, thiserror::Error)]
-pub enum ProbeError {
-    /// 读取系统 USB 信息失败
-    #[error("读取系统 USB 信息失败")]
-    Sysfs(#[from] io::Error),
-}
-
 /// 探针状态。
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProbeState {
@@ -94,27 +85,27 @@ pub struct ProbeWatcher {
 
 impl ProbeWatcher {
     /// 开始监听: 记录当前状态作为基线。
-    pub fn start() -> Result<Self, ProbeError> {
+    pub fn start() -> io::Result<Self> {
         Ok(Self {
             last: detect_probe()?,
         })
     }
 
-    /// 非阻塞检查一次: 状态有变化返回 `Some(新状态)`, 没变化返回 `None`。
-    /// 扫描出错(读不了 sysfs)时保持上次状态, 也返回 `None`。
-    pub fn try_next(&mut self) -> Option<ProbeState> {
-        let now = detect_probe().ok()?;
+    /// 非阻塞检查一次: 状态有变化返回 `Ok(Some(新状态))`, 没变化返回 `Ok(None)`;
+    /// 扫描失败(读不了 sysfs)时把错误原样交给调用方。
+    pub fn try_next(&mut self) -> io::Result<Option<ProbeState>> {
+        let now = detect_probe()?;
         if now == self.last {
-            return None;
+            return Ok(None);
         }
         self.last = now.clone();
-        Some(now)
+        Ok(Some(now))
     }
 }
 
 /// 扫描一次 sysfs, 得知探针当前状态。
 /// 插了多个时取枚举到的第一个(按序列号挑选留待以后)。
-pub fn detect_probe() -> Result<ProbeState, ProbeError> {
+pub fn detect_probe() -> io::Result<ProbeState> {
     for entry in fs::read_dir(USB_DEVICES)? {
         let dir = entry?.path();
         if !is_device_dir(&dir) {
@@ -234,7 +225,7 @@ mod tests {
     fn watcher_reports_nothing_when_unchanged() {
         let mut watcher = ProbeWatcher::start().expect("启动监听失败");
         for _ in 0..3 {
-            assert!(watcher.try_next().is_none(), "状态没变却说变了");
+            assert!(watcher.try_next().unwrap().is_none(), "状态没变却说变了");
         }
     }
 
@@ -252,7 +243,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(90);
         let mut changes = 0;
         while Instant::now() < deadline && changes < 2 {
-            if let Some(state) = watcher.try_next() {
+            if let Some(state) = watcher.try_next().unwrap() {
                 println!("状态变化: {state}");
                 changes += 1;
             }

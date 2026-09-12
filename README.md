@@ -32,7 +32,7 @@ match detect_probe()? {
 // 2) 监听插拔: 每次调用扫一次 sysfs, 状态变了才返回
 let mut watcher = ProbeWatcher::start()?;   // 记录当前状态作为基线
 loop {
-    if let Some(state) = watcher.try_next() {   // 非阻塞; 没变化返回 None
+    if let Some(state) = watcher.try_next()? {   // 非阻塞; 没变化返回 Ok(None)
         println!("状态变化: {state}");
     }
     std::thread::sleep(std::time::Duration::from_millis(100));
@@ -48,12 +48,18 @@ ocd.connect()?;                                    // 连接并完成握手
 - **ST-Link 按 PID 白名单认**(`0483` 下还有虚拟串口等非调试产品);
   **J-Link 按 VID 认**(`1366` 下基本只有调试器);
 - 目前只区分 ST-Link / J-Link 两大类; 插多个时取第一个;
-- `ProbeError` 只表示真故障(读不了 sysfs), "没插探针"用 `ProbeState::Disconnected` 表达。
+- "没插探针"是**状态**(`ProbeState::Disconnected`), 不是错误。
+
+错误处理约定(照 minigrep 的简单路子):
+- 不使用自定义错误类型: 模块里凡可能失败的地方都返回 `io::Result<...>`;
+- 失败用 `?` 一路往上抛, 最终由最上层的 main 打印并退出:
+  `if let Err(e) = run() { eprintln!("{e}"); process::exit(1); }`;
+- 没有第三方依赖。
 
 热插拔的做法(刻意选了最朴素的一种):
 - **没有后台线程**: `try_next()` 就是"扫一次 sysfs, 和上次比", 变了才返回;
 - 实测一次扫描约 **41µs**, 所以按 100Hz 调用也只占单核 0.4%, 不值得为它开线程;
-- 只有 `thiserror` 一个依赖(不需要 libudev), 也不存在"线程怎么关"的问题;
+- 不存在"线程怎么关"的问题, 运行环境也不需要 libudev;
 - 将来若真需要"没人调用时也能收到事件", 可以把 udev 事件塞进 `try_next()` 内部,
   公开接口不用改。
 
